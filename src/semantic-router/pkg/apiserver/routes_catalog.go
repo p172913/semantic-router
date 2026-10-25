@@ -100,7 +100,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleIntentClassification,
 			jsonResponse[services.IntentResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[services.IntentRequest](),
 		),
 		managedRoute(
@@ -108,7 +108,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handlePIIDetection,
 			jsonResponse[services.PIIResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[services.PIIRequest](),
 		),
 		managedRoute(
@@ -116,7 +116,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleSecurityDetection,
 			jsonResponse[services.SecurityResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[services.SecurityRequest](),
 		),
 		managedRoute(
@@ -124,7 +124,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleFactCheckClassification,
 			jsonResponse[services.FactCheckResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[services.FactCheckRequest](),
 		),
 		managedRoute(
@@ -132,7 +132,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleUserFeedbackClassification,
 			jsonResponse[services.UserFeedbackResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[services.UserFeedbackRequest](),
 		),
 		managedRoute(
@@ -140,7 +140,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleCombinedClassification,
 			jsonResponse[CombinedClassificationResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[CombinedClassificationRequest](),
 		),
 		managedRoute(
@@ -148,7 +148,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleBatchClassification,
 			jsonResponse[BatchClassificationResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[BatchClassificationRequest](),
 		),
 		managedRoute(
@@ -156,7 +156,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleEmbeddings,
 			jsonResponse[EmbeddingResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[EmbeddingRequest](),
 		),
 		managedRoute(
@@ -164,7 +164,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleSimilarity,
 			jsonResponse[SimilarityResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[SimilarityRequest](),
 		),
 		managedRoute(
@@ -172,7 +172,7 @@ func apiClassifyRoutes() []apiRoute {
 			routePolicy{Permission: PermClassifyInvoke, Sensitivity: SensitivityOperational},
 			(*ClassificationAPIServer).handleBatchSimilarity,
 			jsonResponse[BatchSimilarityResponse](http.StatusOK, "Successful response"),
-			errorResponses(400, 413, 429, 500, 503),
+			errorResponses(400, 409, 413, 429, 500, 503, 504),
 			jsonBodyFor[BatchSimilarityRequest](),
 		),
 	}

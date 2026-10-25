@@ -15,16 +15,14 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/decision"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/headers"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/binding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/tasks"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelservice"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/metrics"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
 )
 
-// writeClassificationError maps a classification service error to an HTTP
-// status code: empty/whitespace input or a model input limit is a client error
-// (400 INVALID_INPUT);
-// an unavailable classifier or unresolved decision under fail_request is a
-// service outage (503); anything else is treated as an
-// internal error (500 CLASSIFICATION_ERROR).
+// writeClassificationError maps classification service and model-runtime
+// errors to a stable HTTP contract.
 func (s *ClassificationAPIServer) writeClassificationError(w http.ResponseWriter, err error) {
 	if errors.Is(err, services.ErrConfigHashMismatch) {
 		s.writeErrorResponse(w, http.StatusPreconditionFailed, "CONFIG_HASH_MISMATCH", err.Error())
@@ -36,8 +34,15 @@ func (s *ClassificationAPIServer) writeClassificationError(w http.ResponseWriter
 	}
 	if errors.Is(err, services.ErrEmptyText) ||
 		errors.Is(err, services.ErrInvalidRequestFacts) ||
-		errors.Is(err, binding.ErrInputLimit) {
+		errors.Is(err, binding.ErrInvalidInput) ||
+		errors.Is(err, binding.ErrScanBudget) ||
+		errors.Is(err, binding.ErrInputLimit) ||
+		errors.Is(err, modelservice.ErrRejected) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+	if errors.Is(err, binding.ErrCapability) || errors.Is(err, tasks.ErrProbabilitiesUnavailable) {
+		s.writeErrorResponse(w, http.StatusConflict, "UNSUPPORTED_CAPABILITY", err.Error())
 		return
 	}
 	if errors.Is(err, services.ErrUnknownDiagnosticRecipe) {
@@ -48,15 +53,27 @@ func (s *ClassificationAPIServer) writeClassificationError(w http.ResponseWriter
 		s.writeErrorResponse(w, http.StatusBadRequest, "INVALID_ROUTING_MODEL", err.Error())
 		return
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		s.writeErrorResponse(w, http.StatusGatewayTimeout, "CLASSIFICATION_TIMEOUT", err.Error())
+		return
+	}
 	if errors.Is(err, services.ErrClassifierUnavailable) {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "CLASSIFIER_UNAVAILABLE", err.Error())
+		return
+	}
+	if errors.Is(err, binding.ErrNotPrepared) || errors.Is(err, binding.ErrClosed) {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "CLASSIFIER_NOT_READY", err.Error())
+		return
+	}
+	if errors.Is(err, modelservice.ErrUnavailable) {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "CLASSIFIER_NOT_READY", err.Error())
 		return
 	}
 	if errors.Is(err, decision.ErrDecisionUnresolved) {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "DECISION_UNRESOLVED", err.Error())
 		return
 	}
-	if errors.Is(err, admission.ErrQueueFull) {
+	if errors.Is(err, admission.ErrQueueFull) || errors.Is(err, modelservice.ErrOverloaded) {
 		s.writeErrorResponse(w, http.StatusTooManyRequests, "OVERLOADED", err.Error())
 		return
 	}
@@ -175,7 +192,7 @@ func (s *ClassificationAPIServer) handleBatchClassification(w http.ResponseWrite
 	}
 	if err != nil {
 		metrics.RecordBatchClassificationError("unified", "classification_failed")
-		s.writeErrorResponse(w, http.StatusInternalServerError, "UNIFIED_CLASSIFICATION_ERROR", err.Error())
+		s.writeClassificationError(w, err)
 		return
 	}
 

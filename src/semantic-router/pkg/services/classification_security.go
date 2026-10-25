@@ -58,7 +58,7 @@ func (s *ClassificationService) CheckSecurity(ctx context.Context, req SecurityR
 		return nil, ErrClassifierUnavailable
 	}
 	if classifier == nil {
-		return nil, fmt.Errorf("security detector is unavailable")
+		return nil, ErrClassifierUnavailable
 	}
 
 	verdict, err := classifier.CheckForJailbreakVerdict(ctx, req.Text, classifier.Config.PromptGuard.Threshold)

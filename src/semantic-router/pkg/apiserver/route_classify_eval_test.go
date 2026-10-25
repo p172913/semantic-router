@@ -23,11 +23,16 @@ import (
 )
 
 type evalCaptureClassificationService struct {
-	lastEvalReq services.IntentRequest
-	lastPIICtx  context.Context
-	evalResp    *services.EvalResponse
-	evalErr     error
-	intentErr   error
+	lastEvalReq  services.IntentRequest
+	lastPIICtx   context.Context
+	evalResp     *services.EvalResponse
+	evalErr      error
+	intentErr    error
+	piiErr       error
+	securityErr  error
+	batchErr     error
+	factCheckErr error
+	feedbackErr  error
 }
 
 func (s *evalCaptureClassificationService) ClassifyIntent(_ context.Context, req services.IntentRequest) (*services.IntentResponse, error) {
@@ -47,23 +52,23 @@ func (s *evalCaptureClassificationService) ClassifyIntentForEval(_ context.Conte
 
 func (s *evalCaptureClassificationService) DetectPII(ctx context.Context, req services.PIIRequest) (*services.PIIResponse, error) {
 	s.lastPIICtx = ctx
-	return &services.PIIResponse{}, nil
+	return &services.PIIResponse{}, s.piiErr
 }
 
 func (s *evalCaptureClassificationService) CheckSecurity(_ context.Context, req services.SecurityRequest) (*services.SecurityResponse, error) {
-	return &services.SecurityResponse{}, nil
+	return &services.SecurityResponse{}, s.securityErr
 }
 
 func (s *evalCaptureClassificationService) ClassifyBatchUnifiedWithOptions(_ []string, _ interface{}) (*services.UnifiedBatchResponse, error) {
-	return &services.UnifiedBatchResponse{}, nil
+	return &services.UnifiedBatchResponse{}, s.batchErr
 }
 
 func (s *evalCaptureClassificationService) ClassifyFactCheck(_ context.Context, req services.FactCheckRequest) (*services.FactCheckResponse, error) {
-	return &services.FactCheckResponse{}, nil
+	return &services.FactCheckResponse{}, s.factCheckErr
 }
 
 func (s *evalCaptureClassificationService) ClassifyUserFeedback(_ context.Context, req services.UserFeedbackRequest) (*services.UserFeedbackResponse, error) {
-	return &services.UserFeedbackResponse{}, nil
+	return &services.UserFeedbackResponse{}, s.feedbackErr
 }
 
 func (s *evalCaptureClassificationService) HasUnifiedClassifier() bool     { return true }

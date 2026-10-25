@@ -5,12 +5,17 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/admission"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/embedding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/binding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelservice"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
 )
 
 func TestValidateEmbeddingRequestRequiresTextsOrImages(t *testing.T) {
@@ -113,6 +118,84 @@ func TestClassifyEmbeddingErrorMapsInternalFailureTo500(t *testing.T) {
 	status, code, _ := classifyEmbeddingError(errors.New("model not loaded"))
 	if status != http.StatusInternalServerError || code != "EMBEDDING_GENERATION_FAILED" {
 		t.Fatalf("expected 500 EMBEDDING_GENERATION_FAILED, got %d %q", status, code)
+	}
+}
+
+func TestClassifyEmbeddingErrorMapsRuntimeContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+		code string
+	}{
+		{"invalid input", binding.ErrInvalidInput, http.StatusBadRequest, "INVALID_INPUT"},
+		{"input scan budget", binding.ErrScanBudget, http.StatusBadRequest, "INVALID_INPUT"},
+		{"runtime rejected", modelservice.ErrRejected, http.StatusBadRequest, "INVALID_INPUT"},
+		{"unsupported capability", binding.ErrCapability, http.StatusConflict, "UNSUPPORTED_CAPABILITY"},
+		{"binding not prepared", binding.ErrNotPrepared, http.StatusServiceUnavailable, "EMBEDDING_NOT_READY"},
+		{"binding closed", binding.ErrClosed, http.StatusServiceUnavailable, "EMBEDDING_NOT_READY"},
+		{"model not prepared", fmt.Errorf("%w: %w", binding.ErrCapability, embedding.ErrModelNotPrepared), http.StatusServiceUnavailable, "EMBEDDING_NOT_READY"},
+		{"model runtime unavailable", modelservice.ErrUnavailable, http.StatusServiceUnavailable, "EMBEDDING_NOT_READY"},
+		{"wrapped readiness timeout", fmt.Errorf("%w: %w", modelservice.ErrUnavailable, context.DeadlineExceeded), http.StatusGatewayTimeout, "EMBEDDING_TIMEOUT"},
+		{"overloaded", modelservice.ErrOverloaded, http.StatusTooManyRequests, "OVERLOADED"},
+		{"admission queue full", admission.ErrQueueFull, http.StatusTooManyRequests, "OVERLOADED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, _ := classifyEmbeddingError(tc.err)
+			if status != tc.want || code != tc.code {
+				t.Fatalf("classification = %d %q, want %d %q", status, code, tc.want, tc.code)
+			}
+		})
+	}
+}
+
+func TestEmbeddingEndpointsReturnTypedNotReadyErrors(t *testing.T) {
+	api := &ClassificationAPIServer{classificationSvc: services.NewPlaceholderClassificationService()}
+	for _, tc := range []struct {
+		name    string
+		path    string
+		body    string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{"embeddings", "/api/v1/diagnostics/embeddings", `{"texts":["hello"]}`, api.handleEmbeddings},
+		{"similarity", "/api/v1/diagnostics/similarity", `{"text1":"hello","text2":"world"}`, api.handleSimilarity},
+		{"batch similarity", "/api/v1/diagnostics/similarity/batch", `{"query":"hello","candidates":["world"]}`, api.handleBatchSimilarity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			tc.handler(recorder, request)
+			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "EMBEDDING_NOT_READY") {
+				t.Fatalf("response = %d %s, want 503 EMBEDDING_NOT_READY", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestEmbeddingEndpointsValidateInputBeforeReadiness(t *testing.T) {
+	api := &ClassificationAPIServer{classificationSvc: services.NewPlaceholderClassificationService()}
+	for _, tc := range []struct {
+		name    string
+		path    string
+		body    string
+		handler func(http.ResponseWriter, *http.Request)
+		code    string
+	}{
+		{"empty embeddings", "/api/v1/diagnostics/embeddings", `{"texts":[]}`, api.handleEmbeddings, "INVALID_INPUT"},
+		{"invalid embeddings layer", "/api/v1/diagnostics/embeddings", `{"texts":["hello"],"target_layer":2147483648}`, api.handleEmbeddings, "INVALID_LAYER"},
+		{"invalid similarity layer", "/api/v1/diagnostics/similarity", `{"text1":"hello","text2":"world","target_layer":2147483648}`, api.handleSimilarity, "INVALID_LAYER"},
+		{"invalid batch similarity layer", "/api/v1/diagnostics/similarity/batch", `{"query":"hello","candidates":["world"],"target_layer":2147483648}`, api.handleBatchSimilarity, "INVALID_LAYER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			tc.handler(recorder, request)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.code) {
+				t.Fatalf("response = %d %s, want 400 %s", recorder.Code, recorder.Body.String(), tc.code)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,7 @@
 package apiserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -12,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/admission"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/embedding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/binding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelservice"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/observability/logging"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/imageurl"
@@ -32,17 +35,34 @@ func (e *mediaEncodeError) Error() string {
 }
 func (e *mediaEncodeError) Unwrap() error { return e.err }
 
-// classifyEmbeddingError maps an owned inference error to the HTTP status,
-// error code, and client message. Model input limits and input-caused image
-// failures are client errors; other inference failures remain internal errors.
+// classifyEmbeddingError maps an embedding inference error to its HTTP
+// contract while preserving modality-specific input errors.
 func classifyEmbeddingError(err error) (int, string, string) {
-	inputError := errors.Is(err, binding.ErrInvalidInput) || errors.Is(err, binding.ErrInputLimit) || errors.Is(err, binding.ErrCapability)
+	inputError := errors.Is(err, binding.ErrInvalidInput) ||
+		errors.Is(err, binding.ErrInputLimit) ||
+		errors.Is(err, binding.ErrScanBudget) ||
+		errors.Is(err, modelservice.ErrRejected)
 	var mediaErr *mediaEncodeError
 	if inputError && errors.As(err, &mediaErr) {
 		return http.StatusBadRequest, "INVALID_" + strings.ToUpper(mediaErr.modality), fmt.Sprintf("%s[%d] could not be encoded", mediaErr.modality, mediaErr.index)
 	}
 	if inputError {
 		return http.StatusBadRequest, "INVALID_INPUT", err.Error()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout, "EMBEDDING_TIMEOUT", err.Error()
+	}
+	if errors.Is(err, binding.ErrNotPrepared) ||
+		errors.Is(err, binding.ErrClosed) ||
+		errors.Is(err, embedding.ErrModelNotPrepared) ||
+		errors.Is(err, modelservice.ErrUnavailable) {
+		return http.StatusServiceUnavailable, "EMBEDDING_NOT_READY", err.Error()
+	}
+	if errors.Is(err, binding.ErrCapability) {
+		return http.StatusConflict, "UNSUPPORTED_CAPABILITY", err.Error()
+	}
+	if errors.Is(err, admission.ErrQueueFull) || errors.Is(err, modelservice.ErrOverloaded) {
+		return http.StatusTooManyRequests, "OVERLOADED", err.Error()
 	}
 
 	return http.StatusInternalServerError, "EMBEDDING_GENERATION_FAILED",
@@ -77,14 +97,23 @@ func (s *ClassificationAPIServer) handleEmbeddings(w http.ResponseWriter, r *htt
 		s.writeJSONRequestError(w, err)
 		return
 	}
-	cfg, prepared, release, prepareErr := s.acquireEmbeddingRuntimeForRecipe(request.Recipe)
-	defer release()
-	req, ok := s.prepareEmbeddingRequest(w, request, prepared)
-	if !ok {
+	applyEmbeddingDefaults(&request)
+	if code, message, ok := validateEmbeddingRequestShape(request); !ok {
+		s.writeErrorResponse(w, http.StatusBadRequest, code, message)
 		return
 	}
+	cfg, prepared, release, prepareErr := s.acquireEmbeddingRuntimeForRecipe(request.Recipe)
+	defer release()
 	if prepareErr != nil {
 		s.writeEmbeddingRuntimeError(w, prepareErr)
+		return
+	}
+	if !prepared.Ready() {
+		s.writeEmbeddingRuntimeError(w, binding.ErrNotPrepared)
+		return
+	}
+	req, ok := s.prepareEmbeddingRequest(w, request, prepared)
+	if !ok {
 		return
 	}
 	results, totalProcessingTime, err := buildOwnedEmbeddingResults(r.Context(), prepared, req)
@@ -111,6 +140,10 @@ func (s *ClassificationAPIServer) handleEmbeddings(w http.ResponseWriter, r *htt
 
 func (s *ClassificationAPIServer) prepareEmbeddingRequest(w http.ResponseWriter, req EmbeddingRequest, prepared *embedding.Set) (EmbeddingRequest, bool) {
 	applyEmbeddingDefaults(&req)
+	if code, message, ok := validateEmbeddingRequestShape(req); !ok {
+		s.writeErrorResponse(w, http.StatusBadRequest, code, message)
+		return EmbeddingRequest{}, false
+	}
 	if prepared != nil {
 		selected, err := selectOwnedEmbeddingMediaModel(prepared, req)
 		if err != nil {
@@ -127,7 +160,7 @@ func (s *ClassificationAPIServer) prepareEmbeddingRequest(w http.ResponseWriter,
 			break
 		}
 	}
-	if code, message, ok := validateEmbeddingRequest(req, availableLayers); !ok {
+	if code, message, ok := validateEmbeddingTargetLayer(req, availableLayers); !ok {
 		s.writeErrorResponse(w, http.StatusBadRequest, code, message)
 		return EmbeddingRequest{}, false
 	}
@@ -157,6 +190,13 @@ func applyEmbeddingDefaults(req *EmbeddingRequest) {
 }
 
 func validateEmbeddingRequest(req EmbeddingRequest, availableLayers []int) (string, string, bool) {
+	if code, message, ok := validateEmbeddingRequestShape(req); !ok {
+		return code, message, false
+	}
+	return validateEmbeddingTargetLayer(req, availableLayers)
+}
+
+func validateEmbeddingRequestShape(req EmbeddingRequest) (string, string, bool) {
 	if len(req.Texts) == 0 && len(req.Images) == 0 && len(req.Audios) == 0 {
 		return "INVALID_INPUT", "at least one of texts, images or audios must be provided", false
 	}
@@ -166,8 +206,8 @@ func validateEmbeddingRequest(req EmbeddingRequest, availableLayers []int) (stri
 	if !isValidDimension(req.Dimension) {
 		return "INVALID_DIMENSION", fmt.Sprintf(invalidDimensionMessage, req.Dimension), false
 	}
-	if req.TargetLayer < 0 || req.TargetLayer > math.MaxInt32 || (req.TargetLayer > 0 && req.Model != "auto" && !slices.Contains(availableLayers, req.TargetLayer)) {
-		return "INVALID_LAYER", fmt.Sprintf("target_layer must be 0 or one of the loaded model layers: %s (got %d)", formatLayerList(availableLayers), req.TargetLayer), false
+	if req.TargetLayer < 0 || req.TargetLayer > math.MaxInt32 {
+		return "INVALID_LAYER", fmt.Sprintf("target_layer must be between 0 and %d (got %d)", math.MaxInt32, req.TargetLayer), false
 	}
 	if len(req.Audios) > maxAudiosPerRequest {
 		return "INVALID_INPUT", "at most 8 audios may be provided per request", false
@@ -178,6 +218,13 @@ func validateEmbeddingRequest(req EmbeddingRequest, availableLayers []int) (stri
 		}
 	}
 
+	return "", "", true
+}
+
+func validateEmbeddingTargetLayer(req EmbeddingRequest, availableLayers []int) (string, string, bool) {
+	if req.TargetLayer > 0 && req.Model != "auto" && !slices.Contains(availableLayers, req.TargetLayer) {
+		return "INVALID_LAYER", fmt.Sprintf("target_layer must be 0 or one of the loaded model layers: %s (got %d)", formatLayerList(availableLayers), req.TargetLayer), false
+	}
 	return "", "", true
 }
 
@@ -218,6 +265,10 @@ func (s *ClassificationAPIServer) handleSimilarity(w http.ResponseWriter, r *htt
 		s.writeEmbeddingRuntimeError(w, err)
 		return
 	}
+	if prepared == nil || !prepared.Ready() {
+		s.writeEmbeddingRuntimeError(w, binding.ErrNotPrepared)
+		return
+	}
 	start := time.Now()
 	request := EmbeddingRequest{Model: req.Model, Dimension: req.Dimension, TargetLayer: req.TargetLayer, QualityPriority: req.QualityPriority, LatencyPriority: req.LatencyPriority}
 	first, err := ownedEmbeddingOutput(r.Context(), prepared, request, req.Text1)
@@ -233,12 +284,12 @@ func (s *ClassificationAPIServer) handleSimilarity(w http.ResponseWriter, r *htt
 	result := SimilarityResponse{Recipe: embeddingRecipeName(req.Recipe, cfg), Similarity: score, ModelUsed: first.ModelUsed, ProcessingTimeMs: float32(time.Since(start).Microseconds()) / 1000}
 
 	if err != nil {
-		if errors.Is(err, binding.ErrInputLimit) || errors.Is(err, binding.ErrCapability) {
-			s.writeErrorResponse(w, http.StatusBadRequest, "INVALID_INPUT", err.Error())
-			return
+		status, code, message := classifyEmbeddingError(err)
+		if status == http.StatusInternalServerError {
+			code = "SIMILARITY_CALCULATION_FAILED"
+			message = fmt.Sprintf("failed to calculate similarity: %v", err)
 		}
-		s.writeErrorResponse(w, http.StatusInternalServerError, "SIMILARITY_CALCULATION_FAILED",
-			fmt.Sprintf("failed to calculate similarity: %v", err))
+		s.writeErrorResponse(w, status, code, message)
 		return
 	}
 
@@ -276,6 +327,9 @@ func validateSimilarityRequest(req SimilarityRequest) (string, string, bool) {
 	if code, message, ok := validatePriority("latency_priority", req.LatencyPriority); !ok {
 		return code, message, false
 	}
+	if req.TargetLayer < 0 || req.TargetLayer > math.MaxInt32 {
+		return "INVALID_LAYER", fmt.Sprintf("target_layer must be between 0 and %d (got %d)", math.MaxInt32, req.TargetLayer), false
+	}
 	return "", "", true
 }
 
@@ -292,14 +346,19 @@ func (s *ClassificationAPIServer) handleBatchSimilarity(w http.ResponseWriter, r
 		s.writeEmbeddingRuntimeError(w, err)
 		return
 	}
+	if prepared == nil || !prepared.Ready() {
+		s.writeEmbeddingRuntimeError(w, binding.ErrNotPrepared)
+		return
+	}
 	response, err := ownedBatchSimilarity(r.Context(), prepared, req)
 	response.Recipe = embeddingRecipeName(req.Recipe, cfg)
 	if err != nil {
-		if errors.Is(err, binding.ErrInputLimit) || errors.Is(err, binding.ErrCapability) {
-			s.writeErrorResponse(w, http.StatusBadRequest, "INVALID_INPUT", err.Error())
-			return
+		status, code, message := classifyEmbeddingError(err)
+		if status == http.StatusInternalServerError {
+			code = "BATCH_SIMILARITY_FAILED"
+			message = err.Error()
 		}
-		s.writeErrorResponse(w, http.StatusInternalServerError, "BATCH_SIMILARITY_FAILED", err.Error())
+		s.writeErrorResponse(w, status, code, message)
 		return
 	}
 
@@ -366,6 +425,9 @@ func validateBatchSimilarityRequest(req BatchSimilarityRequest) (string, string,
 	if code, message, ok := validatePriority("latency_priority", req.LatencyPriority); !ok {
 		return code, message, false
 	}
+	if req.TargetLayer < 0 || req.TargetLayer > math.MaxInt32 {
+		return "INVALID_LAYER", fmt.Sprintf("target_layer must be between 0 and %d (got %d)", math.MaxInt32, req.TargetLayer), false
+	}
 	return "", "", true
 }
 
@@ -393,7 +455,12 @@ func (s *ClassificationAPIServer) writeEmbeddingRuntimeError(w http.ResponseWrit
 		s.writeClassificationError(w, err)
 		return
 	}
-	s.writeErrorResponse(w, http.StatusServiceUnavailable, "EMBEDDING_UNAVAILABLE", err.Error())
+	status, code, message := classifyEmbeddingError(err)
+	if status == http.StatusInternalServerError {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "EMBEDDING_UNAVAILABLE", err.Error())
+		return
+	}
+	s.writeErrorResponse(w, status, code, message)
 }
 
 func embeddingRecipeName(requested string, cfg *config.RouterConfig) string {

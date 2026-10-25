@@ -13,6 +13,7 @@ import (
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/classification"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/config"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/embedding"
+	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/modelruntime/binding"
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/utils/imageurl"
 )
 
@@ -21,16 +22,20 @@ func preparedEmbeddings(service classificationService) (*embedding.Set, error) {
 		GetClassifier() *classification.Classifier
 	})
 	if !ok {
-		return nil, fmt.Errorf("embedding runtime is unavailable")
+		return nil, fmt.Errorf("%w: embedding runtime is unavailable", binding.ErrNotPrepared)
 	}
 	return classifierEmbeddings(source.GetClassifier())
 }
 
 func classifierEmbeddings(classifier *classification.Classifier) (*embedding.Set, error) {
-	if classifier == nil || classifier.PreparedEmbeddings() == nil {
-		return nil, fmt.Errorf("embedding runtime is unavailable")
+	if classifier == nil {
+		return nil, fmt.Errorf("%w: embedding runtime is unavailable", binding.ErrNotPrepared)
 	}
-	return classifier.PreparedEmbeddings(), nil
+	prepared := classifier.PreparedEmbeddings()
+	if prepared == nil || !prepared.Ready() {
+		return nil, fmt.Errorf("%w: embedding runtime is unavailable", binding.ErrNotPrepared)
+	}
+	return prepared, nil
 }
 
 // Direct provider consumers need a lease over the entire operation, including

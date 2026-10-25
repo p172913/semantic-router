@@ -107,10 +107,17 @@ func TestEmbeddingMediaDefaultsSelectOneVectorSpace(t *testing.T) {
 			t.Fatalf("mixed modalities crossed representations: %+v", result)
 		}
 	}
-	for _, err := range []error{errors.New("execution failed"), binding.ErrClosed, binding.ErrInvalidResult} {
-		status, _, _ := classifyEmbeddingError(&mediaEncodeError{modality: "audio", index: 0, err: err})
-		if status != http.StatusInternalServerError {
-			t.Fatalf("provider failure misclassified as bad audio: %v -> %d", err, status)
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{errors.New("execution failed"), http.StatusInternalServerError},
+		{binding.ErrClosed, http.StatusServiceUnavailable},
+		{binding.ErrInvalidResult, http.StatusInternalServerError},
+	} {
+		status, _, _ := classifyEmbeddingError(&mediaEncodeError{modality: "audio", index: 0, err: tc.err})
+		if status != tc.want {
+			t.Fatalf("provider failure %v mapped to %d, want %d", tc.err, status, tc.want)
 		}
 	}
 }
@@ -118,17 +125,17 @@ func TestEmbeddingMediaDefaultsSelectOneVectorSpace(t *testing.T) {
 func TestEmbeddingAutoMediaRequiresActualCapabilities(t *testing.T) {
 	fp, _ := embedding.NewFuncProvider("synthetic", 2, func(context.Context, string) ([]float32, error) { return []float32{1, 0}, nil })
 	provider := &apiMediaProvider{FuncProvider: fp}
-	for _, prepared := range []*embedding.Set{
-		embedding.NewSet(map[string]embedding.Provider{"multimodal": fp}, "multimodal"),
-		embedding.NewSet(map[string]embedding.Provider{"chosen": provider}, "chosen"),
+	for _, tc := range []struct {
+		prepared  *embedding.Set
+		dimension int
+		want      error
+	}{
+		{embedding.NewSet(map[string]embedding.Provider{"multimodal": fp}, "multimodal"), 0, embedding.ErrModelNotPrepared},
+		{embedding.NewSet(map[string]embedding.Provider{"chosen": provider}, "chosen"), 3, binding.ErrCapability},
 	} {
-		dimension := 0
-		if prepared.Has("chosen") {
-			dimension = 3
-		}
-		_, _, err := buildOwnedEmbeddingResults(context.Background(), prepared, EmbeddingRequest{Audios: []string{apiAudioFixture()}, Dimension: dimension})
-		if !errors.Is(err, binding.ErrCapability) {
-			t.Fatalf("unsupported media selection accepted: %v", err)
+		_, _, err := buildOwnedEmbeddingResults(context.Background(), tc.prepared, EmbeddingRequest{Audios: []string{apiAudioFixture()}, Dimension: tc.dimension})
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("media selection error = %v, want %v", err, tc.want)
 		}
 	}
 }

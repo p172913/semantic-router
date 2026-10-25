@@ -107,7 +107,7 @@ func (s *Set) Select(text string, quality, latency float32, dimension int) (stri
 	if s.Has("") {
 		return s.primary, nil
 	}
-	return "", fmt.Errorf("no prepared embedding model is available")
+	return "", fmt.Errorf("no prepared embedding model is available: %w", ErrModelNotPrepared)
 }
 
 // SelectModalities chooses one already prepared representation for an entire
@@ -115,12 +115,23 @@ func (s *Set) Select(text string, quality, latency float32, dimension int) (stri
 // aliases never imply an encoder capability or trigger model preparation.
 func (s *Set) SelectModalities(modalities []string, dimension, layer int) (string, error) {
 	if s == nil {
-		return "", fmt.Errorf("%w: embedding set was not prepared", binding.ErrCapability)
+		return "", fmt.Errorf("%w: embedding set was not prepared", ErrModelNotPrepared)
 	}
 	models := s.Models()
 	sort.SliceStable(models, func(i, j int) bool {
 		return models[i].Name == s.primary && models[j].Name != s.primary
 	})
+	availableModalities := make(map[string]bool, len(modalities))
+	for _, model := range models {
+		for _, modality := range model.Modalities {
+			availableModalities[modality] = true
+		}
+	}
+	for _, modality := range modalities {
+		if !availableModalities[modality] {
+			return "", fmt.Errorf("%w: no prepared model advertises modality %q", ErrModelNotPrepared, modality)
+		}
+	}
 	for _, model := range models {
 		compatible := true
 		for _, modality := range modalities {

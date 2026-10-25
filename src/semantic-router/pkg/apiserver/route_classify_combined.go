@@ -4,6 +4,7 @@ package apiserver
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/vllm-project/semantic-router/src/semantic-router/pkg/services"
@@ -31,7 +32,7 @@ func (s *ClassificationAPIServer) handleCombinedClassification(w http.ResponseWr
 		s.writeJSONRequestError(w, err)
 		return
 	}
-	if req.Text == "" {
+	if strings.TrimSpace(req.Text) == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "INVALID_INPUT", "text cannot be empty")
 		return
 	}

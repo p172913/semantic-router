@@ -36,8 +36,8 @@ func TestSelectPrefersServedModelsByPriority(t *testing.T) {
 	if got, err := only.Select("short text", 0.9, 0.1, 0); err != nil || got != "mmbert" {
 		t.Errorf("only mmbert prepared: selected %q (%v)", got, err)
 	}
-	if _, err := NewSet(nil, "").Select("short text", 0.5, 0.5, 0); err == nil {
-		t.Error("an empty set selected a model")
+	if _, err := NewSet(nil, "").Select("short text", 0.5, 0.5, 0); !errors.Is(err, ErrModelNotPrepared) {
+		t.Errorf("an empty set error = %v, want ErrModelNotPrepared", err)
 	}
 }
 
@@ -48,5 +48,18 @@ func TestGetReportsAModelTheGenerationDidNotPrepare(t *testing.T) {
 	}
 	if want := `embedding model "mmbert" was not prepared for this generation`; !strings.Contains(err.Error(), want) {
 		t.Fatalf("Get() error = %q, want it to contain %q", err, want)
+	}
+}
+
+func TestSelectModalitiesReportsMissingPreparedModality(t *testing.T) {
+	provider, err := NewFuncProvider("test", 4, func(context.Context, string) ([]float32, error) {
+		return make([]float32, 4), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := NewSet(map[string]Provider{"text": provider}, "text")
+	if _, err := set.SelectModalities([]string{"image"}, 0, 0); !errors.Is(err, ErrModelNotPrepared) {
+		t.Fatalf("SelectModalities() error = %v, want ErrModelNotPrepared", err)
 	}
 }
